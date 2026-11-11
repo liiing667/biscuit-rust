@@ -22,7 +22,7 @@ pub struct Check {
 }
 
 /// Builder for a Biscuit check
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CheckKind {
     One,
     All,
