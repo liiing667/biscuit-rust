@@ -435,6 +435,7 @@ impl AuthorizerBuilder {
             limits: self.limits,
             execution_time: None,
             steps: StepCounter::default(),
+            authorization: None,
         })
     }
 }
@@ -555,12 +556,21 @@ impl AuthorizerExt for AuthorizerBuilder {
 
 impl AuthorizerBuilder {
     pub fn from_snapshot(input: schema::AuthorizerSnapshot) -> Result<Self, error::Token> {
+        let has_authorization_result = input.authorization_result.is_some();
         let schema::AuthorizerSnapshot {
             limits,
             execution_time,
             world,
             elapsed_steps,
+            authorization_result: _,
         } = input;
+
+        if has_authorization_result {
+            return Err(error::Format::DeserializationError(
+                "cannot deserialize an AuthorizerBuilder from a snapshot carrying an authorization result".to_string(),
+            )
+            .into());
+        }
 
         let limits = RunLimits {
             max_facts: limits.max_facts,
@@ -698,6 +708,7 @@ impl AuthorizerBuilder {
             world,
             execution_time: 0u64,
             elapsed_steps: Some(0),
+            authorization_result: None,
             limits: schema::RunLimits {
                 max_facts: self.limits.max_facts,
                 max_iterations: self.limits.max_iterations,

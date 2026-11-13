@@ -604,6 +604,217 @@ pub struct AuthorizerSnapshot {
     pub world: AuthorizerWorld,
     #[prost(uint64, optional, tag = "4")]
     pub elapsed_steps: ::core::option::Option<u64>,
+    /// immutable record of the last authorization decision and its context
+    #[prost(message, optional, tag = "5")]
+    pub authorization_result: ::core::option::Option<AuthorizationResult>,
+}
+/// immutable record of an authorization decision, captured once `authorize`
+/// (or `authorize_with_limits`) has been evaluated
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AuthorizationResult {
+    /// schema version of this record, so consumers can reject unknown formats
+    #[prost(uint32, optional, tag = "1")]
+    pub version: ::core::option::Option<u32>,
+    /// true when an allow policy matched and every check succeeded
+    #[prost(bool, required, tag = "2")]
+    pub allowed: bool,
+    #[prost(message, optional, tag = "3")]
+    pub matched_policy: ::core::option::Option<authorization_result::MatchedPolicy>,
+    /// every check and policy that was evaluated, in evaluation order
+    #[prost(message, repeated, tag = "4")]
+    pub evaluations: ::prost::alloc::vec::Vec<authorization_result::Evaluation>,
+    /// checks that failed validation
+    #[prost(message, repeated, tag = "5")]
+    pub failed_checks: ::prost::alloc::vec::Vec<FailedCheck>,
+    /// budget left after the decision was computed
+    #[prost(message, required, tag = "6")]
+    pub remaining_budget: Budget,
+    /// budget consumed by the whole authorization up to this decision
+    #[prost(message, required, tag = "7")]
+    pub consumed_budget: Budget,
+    /// trust sources that were available to the authorizer itself
+    #[prost(message, repeated, tag = "8")]
+    pub authorizer_trusted_origins: ::prost::alloc::vec::Vec<Origin>,
+    /// Datalog steps taken when the decision was computed
+    #[prost(uint64, required, tag = "9")]
+    pub elapsed_steps: u64,
+    /// engine iterations reached when the decision was computed
+    #[prost(uint64, required, tag = "10")]
+    pub iterations: u64,
+    /// total execution time recorded when the decision was computed, in nanoseconds
+    #[prost(uint64, required, tag = "11")]
+    pub execution_time: u64,
+}
+/// Nested message and enum types in `AuthorizationResult`.
+pub mod authorization_result {
+    /// index of the policy that matched, together with its kind (allow or deny)
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct MatchedPolicy {
+        #[prost(uint32, required, tag = "1")]
+        pub policy_id: u32,
+        #[prost(enumeration = "matched_policy::Kind", required, tag = "2")]
+        pub kind: i32,
+    }
+    /// Nested message and enum types in `MatchedPolicy`.
+    pub mod matched_policy {
+        #[derive(
+            Clone,
+            Copy,
+            Debug,
+            PartialEq,
+            Eq,
+            Hash,
+            PartialOrd,
+            Ord,
+            ::prost::Enumeration
+        )]
+        #[repr(i32)]
+        pub enum Kind {
+            Allow = 0,
+            Deny = 1,
+        }
+        impl Kind {
+            /// String value of the enum field names used in the ProtoBuf definition.
+            ///
+            /// The values are not transformed in any way and thus are considered stable
+            /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    Self::Allow => "Allow",
+                    Self::Deny => "Deny",
+                }
+            }
+            /// Creates an enum from field names used in the ProtoBuf definition.
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "Allow" => Some(Self::Allow),
+                    "Deny" => Some(Self::Deny),
+                    _ => None,
+                }
+            }
+        }
+    }
+    /// one policy or check evaluation, keeping the trust sources that were used
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Evaluation {
+        #[prost(enumeration = "evaluation::Kind", required, tag = "1")]
+        pub kind: i32,
+        #[prost(uint32, required, tag = "2")]
+        pub item_id: u32,
+        #[prost(uint32, optional, tag = "3")]
+        pub block_id: ::core::option::Option<u32>,
+        #[prost(bool, required, tag = "4")]
+        pub success: bool,
+        /// pretty-printed policy or check
+        #[prost(string, required, tag = "5")]
+        pub rule: ::prost::alloc::string::String,
+        /// block ids (and the authorizer marker) that this item was allowed to trust
+        #[prost(message, repeated, tag = "6")]
+        pub trusted_origins: ::prost::alloc::vec::Vec<super::Origin>,
+    }
+    /// Nested message and enum types in `Evaluation`.
+    pub mod evaluation {
+        #[derive(
+            Clone,
+            Copy,
+            Debug,
+            PartialEq,
+            Eq,
+            Hash,
+            PartialOrd,
+            Ord,
+            ::prost::Enumeration
+        )]
+        #[repr(i32)]
+        pub enum Kind {
+            AuthorizerCheck = 0,
+            BlockCheck = 1,
+            Policy = 2,
+        }
+        impl Kind {
+            /// String value of the enum field names used in the ProtoBuf definition.
+            ///
+            /// The values are not transformed in any way and thus are considered stable
+            /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+            pub fn as_str_name(&self) -> &'static str {
+                match self {
+                    Self::AuthorizerCheck => "AuthorizerCheck",
+                    Self::BlockCheck => "BlockCheck",
+                    Self::Policy => "Policy",
+                }
+            }
+            /// Creates an enum from field names used in the ProtoBuf definition.
+            pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+                match value {
+                    "AuthorizerCheck" => Some(Self::AuthorizerCheck),
+                    "BlockCheck" => Some(Self::BlockCheck),
+                    "Policy" => Some(Self::Policy),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Budget {
+    #[prost(uint64, optional, tag = "1")]
+    pub max_facts: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub max_iterations: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "3")]
+    pub max_time: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "4")]
+    pub max_steps: ::core::option::Option<u64>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FailedCheck {
+    #[prost(enumeration = "failed_check::Kind", required, tag = "1")]
+    pub kind: i32,
+    #[prost(uint32, optional, tag = "2")]
+    pub block_id: ::core::option::Option<u32>,
+    #[prost(uint32, required, tag = "3")]
+    pub check_id: u32,
+    #[prost(string, required, tag = "4")]
+    pub rule: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `FailedCheck`.
+pub mod failed_check {
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum Kind {
+        Block = 0,
+        Authorizer = 1,
+    }
+    impl Kind {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Block => "Block",
+                Self::Authorizer => "Authorizer",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "Block" => Some(Self::Block),
+                "Authorizer" => Some(Self::Authorizer),
+                _ => None,
+            }
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RunLimits {

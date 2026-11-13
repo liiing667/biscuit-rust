@@ -255,7 +255,10 @@ pub use crypto::{
     PrivateKey, PublicKey, SerializePrivateKey, SerializePublicKey, Sign, Signature, Verify,
 };
 pub use token::public_keys;
-pub use token::authorizer::{Authorizer, AuthorizerLimits};
+pub use token::authorizer::{
+    Authorizer, AuthorizationBudget, AuthorizationDecision, AuthorizerLimits, Evaluation,
+    EvaluationKind, AUTHORIZATION_RECORD_VERSION, AUTHORIZER_ORIGIN,
+};
 pub use token::builder;
 pub use token::builder::{Algorithm, AuthorizerBuilder, BiscuitBuilder, BlockBuilder};
 pub use token::builder_ext;

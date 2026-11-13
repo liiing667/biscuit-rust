@@ -96,6 +96,14 @@ impl Default for TrustedOrigins {
 }
 
 impl TrustedOrigins {
+    pub(crate) fn from_origin(origin: Origin) -> TrustedOrigins {
+        TrustedOrigins(origin)
+    }
+
+    pub(crate) fn as_origin(&self) -> &Origin {
+        &self.0
+    }
+
     pub(crate) fn from_scopes(
         rule_scopes: &[Scope],
         default_origins: &TrustedOrigins,
@@ -136,6 +144,24 @@ impl TrustedOrigins {
 
     pub(crate) fn contains(&self, fact_origin: &Origin) -> bool {
         self.0.is_superset(fact_origin)
+    }
+
+    /// returns the block ids this set of trust sources is allowed to use
+    ///
+    /// the authorizer itself is represented by
+    /// [`crate::token::authorizer::AUTHORIZER_ORIGIN`]
+    pub fn origins(&self) -> impl Iterator<Item = u32> + '_ {
+        self.0.inner.iter().map(|origin| *origin as u32)
+    }
+
+    /// returns true if these trust sources include the authorizer itself
+    pub fn trusts_authorizer(&self) -> bool {
+        self.0.inner.contains(&usize::MAX)
+    }
+
+    /// returns true if these trust sources include the given block id
+    pub fn trusts_block(&self, block_id: u32) -> bool {
+        self.0.inner.contains(&(block_id as usize))
     }
 }
 

@@ -234,6 +234,82 @@ message AuthorizerSnapshot {
   required uint64 executionTime = 2;
   required AuthorizerWorld world = 3;
   optional uint64 elapsedSteps = 4;
+  // immutable record of the last authorization decision and its context
+  optional AuthorizationResult authorizationResult = 5;
+}
+
+// immutable record of an authorization decision, captured once `authorize`
+// (or `authorize_with_limits`) has been evaluated
+message AuthorizationResult {
+  // index of the policy that matched, together with its kind (allow or deny)
+  message MatchedPolicy {
+    enum Kind {
+      Allow = 0;
+      Deny = 1;
+    }
+
+    required uint32 policyId = 1;
+    required Kind kind = 2;
+  }
+
+  // one policy or check evaluation, keeping the trust sources that were used
+  message Evaluation {
+    enum Kind {
+      AuthorizerCheck = 0;
+      BlockCheck = 1;
+      Policy = 2;
+    }
+
+    required Kind kind = 1;
+    required uint32 itemId = 2;
+    optional uint32 blockId = 3;
+    required bool success = 4;
+    // pretty-printed policy or check
+    required string rule = 5;
+    // block ids (and the authorizer marker) that this item was allowed to trust
+    repeated Origin trustedOrigins = 6;
+  }
+
+  // schema version of this record, so consumers can reject unknown formats
+  optional uint32 version = 1;
+  // true when an allow policy matched and every check succeeded
+  required bool allowed = 2;
+  optional MatchedPolicy matchedPolicy = 3;
+  // every check and policy that was evaluated, in evaluation order
+  repeated Evaluation evaluations = 4;
+  // checks that failed validation
+  repeated FailedCheck failedChecks = 5;
+  // budget left after the decision was computed
+  required Budget remainingBudget = 6;
+  // budget consumed by the whole authorization up to this decision
+  required Budget consumedBudget = 7;
+  // trust sources that were available to the authorizer itself
+  repeated Origin authorizerTrustedOrigins = 8;
+  // Datalog steps taken when the decision was computed
+  required uint64 elapsedSteps = 9;
+  // engine iterations reached when the decision was computed
+  required uint64 iterations = 10;
+  // total execution time recorded when the decision was computed, in nanoseconds
+  required uint64 executionTime = 11;
+}
+
+message Budget {
+  optional uint64 maxFacts = 1;
+  optional uint64 maxIterations = 2;
+  optional uint64 maxTime = 3;
+  optional uint64 maxSteps = 4;
+}
+
+message FailedCheck {
+  enum Kind {
+    Block = 0;
+    Authorizer = 1;
+  }
+
+  required Kind kind = 1;
+  optional uint32 blockId = 2;
+  required uint32 checkId = 3;
+  required string rule = 4;
 }
 
 message RunLimits {

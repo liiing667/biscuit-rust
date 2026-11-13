@@ -23,6 +23,12 @@ use std::{
 
 mod snapshot;
 
+mod authorization;
+pub use authorization::{
+    AuthorizationDecision, Budget as AuthorizationBudget, Evaluation, EvaluationKind,
+    AUTHORIZATION_RECORD_VERSION, AUTHORIZER_ORIGIN,
+};
+
 /// used to check authorization policies on a token
 ///
 /// can be created from [AuthorizerBuilder::build], [AuthorizerBuilder::build_unauthenticated] or [Biscuit::authorizer]
@@ -38,6 +44,8 @@ pub struct Authorizer {
     pub(crate) limits: AuthorizerLimits,
     pub(crate) execution_time: Option<Duration>,
     pub(crate) steps: datalog::StepCounter,
+    /// immutable record of the last authorization decision, if `authorize` ran
+    pub(crate) authorization: Option<authorization::AuthorizationDecision>,
 }
 
 impl Authorizer {
@@ -97,6 +105,7 @@ impl Authorizer {
             limits: AuthorizerLimits::default(),
             execution_time: None,
             steps: datalog::StepCounter::default(),
+            authorization: None,
         }
     }
 
@@ -402,6 +411,15 @@ impl Authorizer {
         self.world.facts.len()
     }
 
+    /// returns the immutable record of the last authorization decision
+    ///
+    /// this is set after a successful or failed call to [`Authorizer::authorize`]
+    /// or [`Authorizer::authorize_with_limits`], and is carried along by
+    /// snapshots so the decision can be audited after deserialization
+    pub fn authorization(&self) -> Option<&authorization::AuthorizationDecision> {
+        self.authorization.as_ref()
+    }
+
     /// verifies the checks and policies
     ///
     /// on error, this can return a list of all the failed checks or deny policy
@@ -431,8 +449,10 @@ impl Authorizer {
         let max_steps = self.max_steps(&limits);
         let execution_time = self.run_with_limits(limits.clone())?;
         let start = Instant::now();
-        let result = self.authorize_inner(limits, max_steps);
-        self.execution_time = Some(execution_time + start.elapsed());
+        let result = self.authorize_inner(limits.clone(), max_steps, execution_time, start);
+        if let Some(decision) = self.authorization.as_ref() {
+            self.execution_time = Some(decision.execution_time);
+        }
 
         result
     }
@@ -441,12 +461,15 @@ impl Authorizer {
         &mut self,
         limits: AuthorizerLimits,
         max_steps: u64,
+        engine_execution_time: Duration,
+        authorize_start: Instant,
     ) -> Result<usize, error::Token> {
         let start = Instant::now();
         let time_limit = start + limits.max_time;
 
         let mut errors = vec![];
         let mut policy_result: Option<Result<usize, usize>> = None;
+        let mut evaluations: Vec<authorization::Evaluation> = vec![];
 
         let mut authorizer_origin = Origin::default();
         authorizer_origin.insert(usize::MAX);
@@ -471,6 +494,7 @@ impl Authorizer {
         for (i, check) in self.authorizer_block_builder.checks.iter().enumerate() {
             let c = check.convert(&mut self.symbols);
             let mut successful = false;
+            let mut check_trusted_origins = TrustedOrigins::default();
 
             for query in check.queries.iter() {
                 let query = query.convert(&mut self.symbols);
@@ -480,6 +504,7 @@ impl Authorizer {
                     usize::MAX,
                     &self.public_key_to_block_id,
                 );
+                check_trusted_origins = rule_trusted_origins.clone();
                 let res = match check.kind {
                     CheckKind::One => self.world.query_match(
                         query,
@@ -515,18 +540,37 @@ impl Authorizer {
             }
 
             if !successful {
+                let rule = self.symbols.print_check(&c);
                 errors.push(error::FailedCheck::Authorizer(
                     error::FailedAuthorizerCheck {
                         check_id: i as u32,
-                        rule: self.symbols.print_check(&c),
+                        rule: rule.clone(),
                     },
                 ));
+                evaluations.push(authorization::Evaluation {
+                    kind: authorization::EvaluationKind::AuthorizerCheck,
+                    item_id: i as u32,
+                    block_id: None,
+                    success: false,
+                    rule,
+                    trusted_origins: check_trusted_origins,
+                });
+            } else {
+                evaluations.push(authorization::Evaluation {
+                    kind: authorization::EvaluationKind::AuthorizerCheck,
+                    item_id: i as u32,
+                    block_id: None,
+                    success: true,
+                    rule: self.symbols.print_check(&c),
+                    trusted_origins: check_trusted_origins,
+                });
             }
         }
 
         if let Some(blocks) = self.blocks.as_ref() {
             for (j, check) in blocks[0].checks.iter().enumerate() {
                 let mut successful = false;
+                let mut check_trusted_origins = TrustedOrigins::default();
 
                 let authority_trusted_origins = TrustedOrigins::from_scopes(
                     &blocks[0].scopes,
@@ -542,6 +586,7 @@ impl Authorizer {
                         0,
                         &self.public_key_to_block_id,
                     );
+                    check_trusted_origins = rule_trusted_origins.clone();
                     let res = match check.kind {
                         CheckKind::One => self.world.query_match(
                             query.clone(),
@@ -577,16 +622,35 @@ impl Authorizer {
                 }
 
                 if !successful {
+                    let rule = self.symbols.print_check(check);
                     errors.push(error::FailedCheck::Block(error::FailedBlockCheck {
                         block_id: 0u32,
                         check_id: j as u32,
-                        rule: self.symbols.print_check(check),
+                        rule: rule.clone(),
                     }));
+                    evaluations.push(authorization::Evaluation {
+                        kind: authorization::EvaluationKind::BlockCheck,
+                        item_id: j as u32,
+                        block_id: Some(0),
+                        success: false,
+                        rule,
+                        trusted_origins: check_trusted_origins,
+                    });
+                } else {
+                    evaluations.push(authorization::Evaluation {
+                        kind: authorization::EvaluationKind::BlockCheck,
+                        item_id: j as u32,
+                        block_id: Some(0),
+                        success: true,
+                        rule: self.symbols.print_check(check),
+                        trusted_origins: check_trusted_origins,
+                    });
                 }
             }
         }
 
         'policies_test: for (i, policy) in self.policies.iter().enumerate() {
+            let mut policy_trusted_origins = TrustedOrigins::default();
             for query in policy.queries.iter() {
                 let query = query.convert(&mut self.symbols);
                 let rule_trusted_origins = TrustedOrigins::from_scopes(
@@ -595,6 +659,7 @@ impl Authorizer {
                     usize::MAX,
                     &self.public_key_to_block_id,
                 );
+                policy_trusted_origins = rule_trusted_origins.clone();
 
                 let res = self.world.query_match(
                     query,
@@ -614,9 +679,25 @@ impl Authorizer {
                         PolicyKind::Allow => policy_result = Some(Ok(i)),
                         PolicyKind::Deny => policy_result = Some(Err(i)),
                     };
+                    evaluations.push(authorization::Evaluation {
+                        kind: authorization::EvaluationKind::Policy,
+                        item_id: i as u32,
+                        block_id: None,
+                        success: true,
+                        rule: policy.to_string(),
+                        trusted_origins: policy_trusted_origins,
+                    });
                     break 'policies_test;
                 }
             }
+            evaluations.push(authorization::Evaluation {
+                kind: authorization::EvaluationKind::Policy,
+                item_id: i as u32,
+                block_id: None,
+                success: false,
+                rule: policy.to_string(),
+                trusted_origins: policy_trusted_origins,
+            });
         }
 
         if let Some(blocks) = self.blocks.as_ref() {
@@ -630,6 +711,7 @@ impl Authorizer {
 
                 for (j, check) in block.checks.iter().enumerate() {
                     let mut successful = false;
+                    let mut check_trusted_origins = TrustedOrigins::default();
 
                     for query in check.queries.iter() {
                         let rule_trusted_origins = TrustedOrigins::from_scopes(
@@ -638,6 +720,7 @@ impl Authorizer {
                             i + 1,
                             &self.public_key_to_block_id,
                         );
+                        check_trusted_origins = rule_trusted_origins.clone();
 
                         let res = match check.kind {
                             CheckKind::One => self.world.query_match(
@@ -674,15 +757,86 @@ impl Authorizer {
                     }
 
                     if !successful {
+                        let rule = self.symbols.print_check(check);
                         errors.push(error::FailedCheck::Block(error::FailedBlockCheck {
                             block_id: (i + 1) as u32,
                             check_id: j as u32,
-                            rule: self.symbols.print_check(check),
+                            rule: rule.clone(),
                         }));
+                        evaluations.push(authorization::Evaluation {
+                            kind: authorization::EvaluationKind::BlockCheck,
+                            item_id: j as u32,
+                            block_id: Some((i + 1) as u32),
+                            success: false,
+                            rule,
+                            trusted_origins: check_trusted_origins,
+                        });
+                    } else {
+                        evaluations.push(authorization::Evaluation {
+                            kind: authorization::EvaluationKind::BlockCheck,
+                            item_id: j as u32,
+                            block_id: Some((i + 1) as u32),
+                            success: true,
+                            rule: self.symbols.print_check(check),
+                            trusted_origins: check_trusted_origins,
+                        });
                     }
                 }
             }
         }
+
+        let matched_policy = match policy_result {
+            Some(Ok(i)) => Some(error::MatchedPolicy::Allow(i)),
+            Some(Err(i)) => Some(error::MatchedPolicy::Deny(i)),
+            None => None,
+        };
+        let allowed =
+            matches!(matched_policy, Some(error::MatchedPolicy::Allow(_))) && errors.is_empty();
+
+        let elapsed_steps = self.steps.taken();
+        let iterations = self.world.iterations;
+        // the engine run time plus the time spent evaluating checks and
+        // policies; sample the clock once so the consumed and remaining
+        // budgets always add up exactly to the configured limit
+        let execution_time = engine_execution_time + authorize_start.elapsed();
+        let fact_count = self.world.facts.len() as u64;
+        // the record describes the whole authorizer lifetime, so the budgets
+        // are computed against the configured limits rather than the
+        // per-call limits passed to `authorize_with_limits`
+        let lifetime_limits = self.limits.clone();
+        // work in whole nanoseconds for both budgets so their sum is exact
+        let consumed_time_nanos = execution_time.as_nanos() as u64;
+        let remaining_time_nanos =
+            (lifetime_limits.max_time.as_nanos() as u64).saturating_sub(consumed_time_nanos);
+
+        let consumed_budget = authorization::Budget {
+            facts: fact_count,
+            iterations,
+            time: Duration::from_nanos(consumed_time_nanos),
+            steps: elapsed_steps,
+        };
+        let remaining_budget = authorization::Budget {
+            facts: lifetime_limits.max_facts.saturating_sub(fact_count),
+            iterations: lifetime_limits.max_iterations.saturating_sub(iterations),
+            time: Duration::from_nanos(remaining_time_nanos),
+            // `max_steps` is the total step ceiling over the authorizer
+            // lifetime, while `elapsed_steps` counts all steps taken so far
+            steps: lifetime_limits.max_steps.saturating_sub(elapsed_steps),
+        };
+
+        self.authorization = Some(authorization::AuthorizationDecision {
+            version: authorization::AUTHORIZATION_RECORD_VERSION,
+            allowed,
+            matched_policy: matched_policy.clone(),
+            evaluations,
+            failed_checks: errors.clone(),
+            remaining_budget,
+            consumed_budget,
+            authorizer_trusted_origins: authorizer_trusted_origins.clone(),
+            elapsed_steps,
+            iterations,
+            execution_time: Duration::from_nanos(consumed_time_nanos),
+        });
 
         match (policy_result, errors.is_empty()) {
             (Some(Ok(i)), true) => Ok(i),

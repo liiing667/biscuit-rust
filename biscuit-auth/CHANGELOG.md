@@ -14,6 +14,12 @@
   `performance.now()` is now limited to `wasm32-unknown-unknown`, other wasm targets use
   `std::time::Instant`.
 - `Authorizer` now carries a step counter that aborts datalog evaluation after a given number of operations. This is more reliable and finer-grained than the timer approach (#352, #357)
+- `Authorizer` snapshots can now carry a versioned, immutable authorization decision. After
+  `authorize` runs, the authorizer records the matched policy (or the absence of one), every
+  evaluated check and policy with its result and trust sources, the failed checks, and the
+  consumed and remaining budgets. The record is serialized by `snapshot`/`to_raw_snapshot`/
+  `to_base64_snapshot` and validated for consistency on deserialization, without changing the
+  existing `authorize` return value.
 
 ## Breaking changes
 
