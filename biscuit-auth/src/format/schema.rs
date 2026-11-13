@@ -577,6 +577,10 @@ pub struct AuthorizerPolicies {
     pub checks: ::prost::alloc::vec::Vec<Check>,
     #[prost(message, repeated, tag = "6")]
     pub policies: ::prost::alloc::vec::Vec<Policy>,
+    #[prost(message, repeated, tag = "7")]
+    pub scopes: ::prost::alloc::vec::Vec<Scope>,
+    #[prost(message, repeated, tag = "8")]
+    pub public_keys: ::prost::alloc::vec::Vec<PublicKey>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ThirdPartyBlockRequest {

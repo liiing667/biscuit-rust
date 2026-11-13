@@ -215,6 +215,8 @@ message AuthorizerPolicies {
   repeated Rule rules = 4;
   repeated Check checks = 5;
   repeated Policy policies = 6;
+  repeated Scope scopes = 7;
+  repeated PublicKey public_keys = 8;
 }
 
 message ThirdPartyBlockRequest {

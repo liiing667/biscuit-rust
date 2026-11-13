@@ -124,12 +124,15 @@ impl Authorizer {
 
         let checks = self.authorizer_block_builder.checks.to_vec();
 
+        let scopes = self.authorizer_block_builder.scopes.to_vec();
+
         Ok(AuthorizerPolicies {
             version: crate::token::MAX_SCHEMA_VERSION,
             facts,
             rules,
             checks,
             policies: self.policies.clone(),
+            scopes,
         })
     }
 
@@ -903,6 +906,7 @@ impl TryFrom<AuthorizerPolicies> for Authorizer {
             rules,
             checks,
             policies,
+            scopes,
         } = authorizer_policies;
 
         let mut authorizer = Self::new();
@@ -924,6 +928,10 @@ impl TryFrom<AuthorizerPolicies> for Authorizer {
             authorizer.policies.push(policy);
         }
 
+        for scope in scopes {
+            authorizer.authorizer_block_builder = authorizer.authorizer_block_builder.scope(scope);
+        }
+
         Ok(authorizer)
     }
 }
@@ -938,6 +946,8 @@ pub struct AuthorizerPolicies {
     /// checks that the token and ambient data must validate
     pub checks: Vec<Check>,
     pub policies: Vec<Policy>,
+    /// root-level trust scopes applied to the authorizer
+    pub scopes: Vec<crate::token::builder::Scope>,
 }
 
 impl AuthorizerPolicies {
@@ -1657,6 +1667,257 @@ allow if true;
         assert_eq!(
             res.unwrap_err(),
             error::Token::RunLimit(error::RunLimit::TooManySteps)
+        );
+    }
+
+    #[test]
+    fn save_and_from_preserves_root_scopes() {
+        let external = PrivateKey::new();
+
+        let authorizer = AuthorizerBuilder::new()
+            .fact("ambient(true)")
+            .unwrap()
+            .scope(builder::Scope::Authority)
+            .scope(builder::Scope::PublicKey(PublicKeyData::from(
+                &external.public(),
+            )))
+            .policy("allow if true")
+            .unwrap()
+            .build_unauthenticated()
+            .unwrap();
+
+        let serialized = authorizer.save().unwrap().serialize().unwrap();
+        let restored = Authorizer::from(&serialized).unwrap();
+
+        assert_eq!(
+            restored.authorizer_block_builder.scopes,
+            authorizer.authorizer_block_builder.scopes
+        );
+    }
+
+    #[test]
+    fn save_and_from_without_scopes_roundtrips() {
+        let authorizer = AuthorizerBuilder::new()
+            .code(
+                r#"
+                resource("file1");
+                check if resource("file1");
+                allow if true;
+                "#,
+            )
+            .unwrap()
+            .build_unauthenticated()
+            .unwrap();
+
+        let serialized = authorizer.save().unwrap().serialize().unwrap();
+        let restored = Authorizer::from(&serialized).unwrap();
+
+        assert!(restored.authorizer_block_builder.scopes.is_empty());
+        assert_eq!(
+            restored.authorizer_block_builder.facts.len(),
+            authorizer.authorizer_block_builder.facts.len()
+        );
+        assert_eq!(
+            restored.authorizer_block_builder.checks.len(),
+            authorizer.authorizer_block_builder.checks.len()
+        );
+        assert_eq!(restored.policies.len(), authorizer.policies.len());
+        assert_eq!(
+            restored.authorizer_block_builder.facts[0].predicate,
+            authorizer.authorizer_block_builder.facts[0].predicate
+        );
+    }
+
+    #[test]
+    fn from_legacy_data_without_scopes_keeps_default_trust() {
+        // an old payload has no `scopes` (tag 7) or `public_keys` (tag 8) fields
+        let legacy = {
+            let policies = AuthorizerPolicies {
+                version: crate::token::MAX_SCHEMA_VERSION,
+                facts: vec![],
+                rules: vec![],
+                checks: vec![],
+                policies: vec![],
+                scopes: vec![],
+            };
+            let mut proto = crate::format::convert::authorizer_to_proto_authorizer(&policies);
+            proto.scopes.clear();
+            proto.public_keys.clear();
+
+            let mut data = Vec::new();
+            use prost::Message;
+            proto.encode(&mut data).unwrap();
+            data
+        };
+
+        let restored = Authorizer::from(&legacy).unwrap();
+        assert!(restored.authorizer_block_builder.scopes.is_empty());
+    }
+
+    #[test]
+    fn from_rejects_duplicate_public_keys() {
+        let external = PrivateKey::new();
+        let key = PublicKeyData::from(&external.public());
+
+        let mut proto =
+            crate::format::convert::authorizer_to_proto_authorizer(&AuthorizerPolicies {
+                version: crate::token::MAX_SCHEMA_VERSION,
+                facts: vec![],
+                rules: vec![],
+                checks: vec![],
+                policies: vec![],
+                scopes: vec![builder::Scope::PublicKey(key.clone())],
+            });
+        // the same public key is listed twice in the public key table
+        let duplicated_key = proto.public_keys[0].clone();
+        proto.public_keys.push(duplicated_key);
+
+        let mut data = Vec::new();
+        use prost::Message;
+        proto.encode(&mut data).unwrap();
+
+        let err = Authorizer::from(&data).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                error::Token::Format(error::Format::PublicKeyTableOverlap)
+            ),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn from_rejects_scope_referencing_unknown_public_key() {
+        let external = PrivateKey::new();
+
+        let mut proto =
+            crate::format::convert::authorizer_to_proto_authorizer(&AuthorizerPolicies {
+                version: crate::token::MAX_SCHEMA_VERSION,
+                facts: vec![],
+                rules: vec![],
+                checks: vec![],
+                policies: vec![],
+                scopes: vec![builder::Scope::PublicKey(PublicKeyData::from(
+                    &external.public(),
+                ))],
+            });
+        // drop the public key table while keeping the scope reference
+        proto.public_keys.clear();
+
+        let mut data = Vec::new();
+        use prost::Message;
+        proto.encode(&mut data).unwrap();
+
+        let err = Authorizer::from(&data).unwrap_err();
+        assert!(
+            matches!(err, error::Token::Format(error::Format::UnknownExternalKey)),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn root_scope_survives_save_and_from_with_third_party_block() {
+        let root = PrivateKey::new();
+        let trusted_external = PrivateKey::new();
+        let untrusted_external = PrivateKey::new();
+
+        // a token carrying a third-party block signed by `trusted_external`
+        let biscuit = Biscuit::builder()
+            .fact("right(\"read\")")
+            .unwrap()
+            .build(&root)
+            .unwrap();
+        let request = biscuit.third_party_request().unwrap();
+        let third_party_block = request
+            .create_block(
+                &trusted_external,
+                BlockBuilder::new().fact("group(\"admin\")").unwrap(),
+            )
+            .unwrap();
+        let biscuit = biscuit
+            .append_third_party(trusted_external.public(), third_party_block)
+            .unwrap();
+
+        let mut original = AuthorizerBuilder::new()
+            .scope(builder::Scope::PublicKey(PublicKeyData::from(
+                &trusted_external.public(),
+            )))
+            .policy("allow if true")
+            .unwrap()
+            .build(&biscuit)
+            .unwrap();
+        let serialized = original.save().unwrap().serialize().unwrap();
+        let restored = Authorizer::from(&serialized).unwrap();
+
+        // the restored authorizer must carry the same root scope
+        assert_eq!(
+            restored.authorizer_block_builder.scopes,
+            original.authorizer_block_builder.scopes
+        );
+
+        // re-apply the restored policies on the same token, as a service would
+        // do after loading its saved authorizer configuration
+        let mut restored_with_token = AuthorizerBuilder::new()
+            .merge_block(restored.authorizer_block_builder.clone())
+            .build(&biscuit)
+            .unwrap();
+        for policy in restored.policies.clone() {
+            restored_with_token.policies.push(policy);
+        }
+
+        let limits = AuthorizerLimits {
+            max_time: Duration::from_secs(10),
+            ..Default::default()
+        };
+
+        // facts from the explicitly trusted third-party block remain visible
+        let trusted_query = {
+            let mut rule: Rule = "group($group) <- group($group) trusting {pk}"
+                .try_into()
+                .unwrap();
+            rule.set_scope("pk", PublicKeyData::from(&trusted_external.public()))
+                .unwrap();
+            rule
+        };
+        assert_eq!(
+            {
+                let res: Vec<(String,)> = original
+                    .query_with_limits(trusted_query.clone(), limits.clone())
+                    .unwrap();
+                res.len()
+            },
+            1
+        );
+        assert_eq!(
+            {
+                let res: Vec<(String,)> = restored_with_token
+                    .query_with_limits(trusted_query, limits.clone())
+                    .unwrap();
+                res.len()
+            },
+            1
+        );
+
+        // a third party whose key is not in the trust scope can never be observed
+        let untrusted_query = {
+            let mut rule: Rule = "group($group) <- group($group) trusting {pk}"
+                .try_into()
+                .unwrap();
+            rule.set_scope("pk", PublicKeyData::from(&untrusted_external.public()))
+                .unwrap();
+            rule
+        };
+        let untrusted_result: Vec<(String,)> = restored_with_token
+            .query_with_limits(untrusted_query, limits.clone())
+            .unwrap();
+        assert!(untrusted_result.is_empty());
+
+        // authorization results are identical before and after persistence
+        assert_eq!(
+            original.authorize_with_limits(limits.clone()).unwrap(),
+            restored_with_token.authorize_with_limits(limits).unwrap()
         );
     }
 }

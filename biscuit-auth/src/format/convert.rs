@@ -239,6 +239,19 @@ pub fn authorizer_to_proto_authorizer(input: &AuthorizerPolicies) -> schema::Aut
         .map(|p| policy_to_proto_policy(p, &mut symbols))
         .collect();
 
+    let scopes = input
+        .scopes
+        .iter()
+        .map(|s| token_scope_to_proto_scope(&s.convert(&mut symbols)))
+        .collect();
+
+    let public_keys = symbols
+        .public_keys
+        .keys
+        .iter()
+        .map(|key| key.to_proto())
+        .collect();
+
     schema::AuthorizerPolicies {
         symbols: symbols.strings(),
         version: Some(input.version),
@@ -246,6 +259,8 @@ pub fn authorizer_to_proto_authorizer(input: &AuthorizerPolicies) -> schema::Aut
         rules,
         checks,
         policies,
+        scopes,
+        public_keys,
     }
 }
 
@@ -261,12 +276,21 @@ pub fn proto_authorizer_to_authorizer(
         });
     }
 
-    let symbols = SymbolTable::from(input.symbols.clone())?;
+    let mut public_keys = PublicKeys::new();
+    for key in &input.public_keys {
+        // fail closed: a duplicated public key entry is rejected instead of
+        // silently collapsing the public key table
+        public_keys.insert_fallible(&PublicKeyData::from_proto(key))?;
+    }
+
+    let symbols =
+        SymbolTable::from_symbols_and_public_keys(input.symbols.clone(), public_keys.into_inner())?;
 
     let mut facts = vec![];
     let mut rules = vec![];
     let mut checks = vec![];
     let mut policies = vec![];
+    let mut scopes = vec![];
 
     for fact in input.facts.iter() {
         facts.push(crate::builder::Fact::convert_from(
@@ -293,12 +317,22 @@ pub fn proto_authorizer_to_authorizer(
         policies.push(proto_policy_to_policy(policy, &symbols, version)?);
     }
 
+    for scope in input.scopes.iter() {
+        let scope = proto_scope_to_token_scope(scope)?;
+        // fail closed: a scope referencing a missing or unknown public key
+        // must not be loaded with a relaxed default trust boundary
+        scopes.push(crate::token::builder::Scope::convert_from(
+            &scope, &symbols,
+        )?);
+    }
+
     Ok(AuthorizerPolicies {
         version,
         facts,
         rules,
         checks,
         policies,
+        scopes,
     })
 }
 
